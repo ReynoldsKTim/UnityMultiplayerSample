@@ -3,14 +3,18 @@ using UnityEngine.Assertions;
 using Unity.Collections;
 using Unity.Networking.Transport;
 using NetworkMessages;
+using NetworkObjects;
 using System;
 using System.Text;
+using System.Collections;
+using System.Collections.Generic;
 
 public class NetworkServer : MonoBehaviour
 {
     public NetworkDriver m_Driver;
     public ushort serverPort;
     private NativeList<NetworkConnection> m_Connections;
+    private List<NetworkObjects.NetworkPlayer> m_Players;
 
     void Start ()
     {
@@ -23,6 +27,33 @@ public class NetworkServer : MonoBehaviour
             m_Driver.Listen();
 
         m_Connections = new NativeList<NetworkConnection>(16, Allocator.Persistent);
+        m_Players = new List<NetworkObjects.NetworkPlayer>(16);
+
+        InvokeRepeating("serverUpdate", 0.1f, 0.1f);
+    }
+
+    void serverUpdate()
+    {
+        ServerUpdateMsg m = new ServerUpdateMsg();
+        if(m_Connections.Length > 0 && m_Players.Count > 0)
+        {
+            for (int i = 0; i < m_Connections.Length; i++)
+            {
+                m.players.Add(new NetworkObjects.NetworkPlayer());
+                m.players[i].id = m_Players[i].id;
+                for (int k = 0; k < m_Players.Count; k++)
+                {
+                    if (m_Players[k].id == m.players[i].id)
+                    {
+                        m.players[i].cubePos = m_Players[k].cubePos;
+                    }
+                }
+            }
+            for (int i = 0; i < m_Connections.Length; i++)
+            {
+                SendToClient(JsonUtility.ToJson(m), m_Connections[i]);
+            }
+        }
     }
 
     void SendToClient(string message, NetworkConnection c){
@@ -38,13 +69,70 @@ public class NetworkServer : MonoBehaviour
     }
 
     void OnConnect(NetworkConnection c){
-        m_Connections.Add(c);
-        Debug.Log("Accepted a connection");
+        NetworkObjects.NetworkPlayer temp = new NetworkObjects.NetworkPlayer();
+        temp.id = c.InternalId.ToString();
+        temp.timeOfLastMsg = Time.time;
 
-        //// Example to send a handshake message:
-        // HandshakeMsg m = new HandshakeMsg();
-        // m.player.id = c.InternalId.ToString();
-        // SendToClient(JsonUtility.ToJson(m),c);        
+        if(m_Players.Count > 0)
+        {
+            for (int i = 0; i < m_Players.Count; i++)
+            {
+                ServerNewPlyrMsg m = new ServerNewPlyrMsg();
+                m.player = temp;
+                SendToClient(JsonUtility.ToJson(m), m_Connections[i]);
+            }
+        }
+
+        m_Connections.Add(c);
+        m_Players.Add(temp);
+        Debug.Log("Accepted a connection");       
+    }
+
+    void movePlayer(PlayerUpdateMsg puMsg)
+    {
+        Vector3 temp = puMsg.player.cubePos;
+        if(puMsg.player.movingLeft == 1 && puMsg.player.movingRight == 1)
+        {
+            //no movement
+        }
+        else if(puMsg.player.movingLeft == 0 && puMsg.player.movingRight == 0)
+        {
+            //no movement
+        }
+        else if(puMsg.player.movingLeft == 1 && puMsg.player.movingRight == 0)
+        {
+            temp.x -= 1;
+        }
+        else if(puMsg.player.movingLeft == 0 && puMsg.player.movingRight == 1)
+        {
+            temp.x += 1;
+        }
+
+        if(puMsg.player.movingForward == 1 && puMsg.player.movingBackward == 1)
+        {
+            //no movement
+        }
+        else if (puMsg.player.movingForward == 0 && puMsg.player.movingBackward == 0)
+        {
+            //no movement
+        }
+        else if (puMsg.player.movingForward == 1 && puMsg.player.movingBackward == 0)
+        {
+            temp.z += 1;
+        }
+        else if (puMsg.player.movingForward == 0 && puMsg.player.movingBackward == 1)
+        {
+            temp.z -= 1;
+        }
+
+        for(int i = 0; i < m_Players.Count; i++)
+        {
+            if (m_Players[i].id == puMsg.player.id)
+            {
+                m_Players[i].cubePos = temp;
+                m_Players[i].timeOfLastMsg = Time.time;
+            }
+        }
     }
 
     void OnData(DataStreamReader stream, int i){
@@ -60,7 +148,8 @@ public class NetworkServer : MonoBehaviour
             break;
             case Commands.PLAYER_UPDATE:
             PlayerUpdateMsg puMsg = JsonUtility.FromJson<PlayerUpdateMsg>(recMsg);
-            Debug.Log("Player update message received!");
+            movePlayer(puMsg);
+            //Debug.Log("Player update message received!");
             break;
             case Commands.SERVER_UPDATE:
             ServerUpdateMsg suMsg = JsonUtility.FromJson<ServerUpdateMsg>(recMsg);
@@ -73,8 +162,19 @@ public class NetworkServer : MonoBehaviour
     }
 
     void OnDisconnect(int i){
+        if (m_Players.Count > 0)
+        {
+            for (int k = 0; k < m_Players.Count; k++)
+            {
+                ServerPlyrLeftMsg m = new ServerPlyrLeftMsg(); // may have to instantiate a new player for the message
+                m.player = m_Players[i];
+                SendToClient(JsonUtility.ToJson(m), m_Connections[k]);
+            }
+        }
+
         Debug.Log("Client disconnected from server");
         m_Connections[i] = default(NetworkConnection);
+        m_Players.RemoveAt(i);
     }
 
     void Update ()
@@ -102,6 +202,14 @@ public class NetworkServer : MonoBehaviour
             c = m_Driver.Accept();
         }
 
+        //remove Inactive players
+        for(int i = 0; i < m_Players.Count; i++)
+        {
+            if (Time.time - m_Players[i].timeOfLastMsg > 5.0f)
+            {
+                OnDisconnect(i);
+            }
+        }
 
         // Read Incoming Messages
         DataStreamReader stream;
